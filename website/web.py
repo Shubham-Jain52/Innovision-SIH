@@ -4,6 +4,9 @@ import ast
 from streamlit_folium import folium_static
 import folium
 from folium.plugins import Search
+import random
+import threading
+import os
 
 st.set_page_config(layout="wide")
 
@@ -68,7 +71,25 @@ def read_traffic_data(filepath="traffic_data.txt"):
         st.error(f"Error parsing the data file: {e}")
         return None
 
-# --- Render different views in placeholders so map doesn't persist ---
+# --- Random updater function ---
+def random_updater(filepath="traffic_data.txt"):
+    lanes = ["L1", "L2", "L3", "L4"]
+    while True:
+        chosen_lane = random.choice(lanes)
+        traffic_data = {lane: (lane == chosen_lane) for lane in lanes}
+        with open(filepath, "w") as f:
+            f.write(str(traffic_data))
+        time.sleep(random.uniform(5, 15))  # random interval 2–5 seconds
+
+# --- Start updater in background thread (only once) ---
+if 'updater_started' not in st.session_state:
+    if not os.path.exists("traffic_data.txt"):
+        with open("traffic_data.txt", "w") as f:
+            f.write(str({lane: False for lane in ["L1","L2","L3","L4"]}))
+    threading.Thread(target=random_updater, daemon=True).start()
+    st.session_state.updater_started = True
+
+# --- Render different views ---
 traffic_placeholder = st.empty()
 heatmap_placeholder = st.empty()
 
@@ -85,7 +106,6 @@ if view_mode == "Traffic":
             with cols[i]:
                 st.header(lane_name)
                 display_traffic_light(st.session_state.lanes[lane_name])
-                st.write("")
         time.sleep(1)
         st.rerun()
 
@@ -111,3 +131,4 @@ elif view_mode == "Heatmap":
         st.header("Traffic Congestion Heatmap")
         st.write("The map below shows a heatmap of traffic congestion with search functionality.")
         folium_static(m)
+
