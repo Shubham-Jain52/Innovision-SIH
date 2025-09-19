@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Leaflet Search + Editable Custom Places</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
+  <style>
+    body,html { height:100%; margin:0; }
+    #map { height:100%; }
+    .msg {
+      position: absolute; right: 10px; top: 70px;
+      background: rgba(255,255,255,0.95); padding:8px 12px;
+      border-radius:6px; box-shadow:0 2px 6px rgba(0,0,0,.2);
+      font-family: Arial, sans-serif; z-index:1000;
+    }
+    .small-btn { margin-left:6px; font-size:12px; padding:4px 8px; }
+    .control-note { font-size:12px; color:#444; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="msg" class="msg" style="display:none;"></div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+  <script>
+    // ---------- map + base ----------
+    const map = L.map('map').setView([20.2961, 85.8245], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    // ---------- custom places storage ----------
+    let customPlaces = JSON.parse(localStorage.getItem('customPlaces') || '{}');
+    const savedMarkers = {}; // name -> marker
+
+    function saveCustomPlaces() {
+      localStorage.setItem('customPlaces', JSON.stringify(customPlaces));
+      showMessage('Saved custom places.');
+    }
+
+    // add saved markers on load
+    function addSavedMarkersToMap() {
+      // remove old
+      Object.values(savedMarkers).forEach(m => map.removeLayer(m));
+      Object.keys(customPlaces).forEach(name => {
+        const coords = customPlaces[name];
+        const marker = L.marker(coords, { title: name, draggable: false }).addTo(map);
+        marker.bindPopup(`<b>${name}</b><br>
+          <button onclick="editSavedPlace('${escapeHtml(name)}')">Edit (drag & save)</button>
+          <button onclick="deleteSavedPlace('${escapeHtml(name)}')">Delete</button>
+        `);
+        savedMarkers[name] = marker;
+      });
+    }
+
+    // helper to avoid breaking popup inline calls when name has quotes
+    function escapeHtml(str) {
+      return str.replace(/'/g, "\\'").replace(/"/g,'&quot;');
+    }
+
+    // show small msg
+    function showMessage(text, t = 2500) {
+      const el = document.getElementById('msg');
+      el.innerText = text;
+      el.style.display = 'block';
+      clearTimeout(el._timeout);
+      el._timeout = setTimeout(()=> el.style.display='none', t);
+    }
+
+    // ---------- geocoder ----------
+    const nominatim = L.Control.Geocoder.nominatim();
+    const geocoderControl = L.Control.geocoder({ defaultMarkGeocode: false })
+      .on('markgeocode', function(e) {
+        const latlng = e.geocode.center;
+        L.marker(latlng).addTo(map).bindPopup(`<b>${e.geocode.name}</b><br><small>From Nominatim</small>`).openPopup();
+        map.setView(latlng, 16);
+      })
+      .addTo(map);
+
+    // intercept the geocoder input so we can fallback to customPlaces or allow "no result" actions
+    function attachSearchInterceptor() {
+      const input = document.querySelector('.leaflet-control-geocoder-form input');
+      if (!input) return;
+      input.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          const q = input.value.trim().toLowerCase();
+          if (!q) return;
+          // 1) exact match in customPlaces
+          if (customPlaces[q]) {
+            const coords = customPlaces[q];
+            map.setView(coords, 16);
+            L.marker(coords).addTo(map).bindPopup(`<b>${q}</b><br><small>From custom places</small>`).openPopup();
+            return;
+          }
+          // 2) try Nominatim
+          nominatim.geocode(q, function(results) {
+            if (results && results.length) {
+              const r = results[0];
+              map.setView(r.center, 16);
+              L.marker(r.center).addTo(map).bindPopup(`<b>${r.name}</b><br><small>From Nominatim</small>`).openPopup();
+            } else {
+              // 3) nothing found -> help user save correct location
+              showMessage('No geocoder result. Right-click map at the correct spot to save this name.', 5000);
+            }
+          });
+        }
+      });
+    }
+
+    // wait and attach
+    setTimeout(attachSearchInterceptor, 300);
+
+    // ---------- right-click to save a place ----------
+    map.on('contextmenu', function(e) {
+      // ask for name
+      const name = prompt('Enter place name to save at this point (e.g. "KIIT Chowk"):');
+      if (!name) return;
+      const key = name.trim().toLowerCase();
+      customPlaces[key] = [e.latlng.lat, e.latlng.lng];
+      saveCustomPlaces();
+      addSavedMarkersToMap();
+      showMessage(`Saved "${name}" at ${e.latlng.lat.toFixed(6)}, ${e.latlng.lng.toFixed(6)}`, 4000);
+    });
+
+    // ---------- edit saved place: create a draggable temp marker and Save ----------
+    window.editSavedPlace = function(name) {
+      // name comes escaped from popup; unescape if needed
+      const key = name.toLowerCase();
+      const coords = customPlaces[key];
+      if (!coords) return alert('Saved place not found.');
+      // create draggable marker
+      const temp = L.marker(coords, { draggable:true }).addTo(map);
+      map.setView(coords, 16);
+      temp.bindPopup(`<b>Drag to correct location</b><br>
+        <button id="savePlaceBtn">Save corrected position</button>
+        <button id="cancelPlaceBtn">Cancel</button>
+      `).openPopup();
+
+      // attach button events after popup opens
+      temp.on('popupopen', () => {
+        document.getElementById('savePlaceBtn').onclick = () => {
+          const p = temp.getLatLng();
+          customPlaces[key] = [p.lat, p.lng];
+          saveCustomPlaces();
+          addSavedMarkersToMap();
+          map.removeLayer(temp);
+          showMessage(`Updated "${name}"`);
+        };
+        document.getElementById('cancelPlaceBtn').onclick = () => {
+          map.removeLayer(temp);
+        };
+      });
+    };
+
+    // ---------- delete saved place ----------
+    window.deleteSavedPlace = function(name) {
+      const key = name.toLowerCase();
+      if (!customPlaces[key]) return;
+      if (!confirm(`Delete saved place "${name}"?`)) return;
+      delete customPlaces[key];
+      saveCustomPlaces();
+      addSavedMarkersToMap();
+      showMessage(`Deleted "${name}".`);
+    };
+
+    // ---------- small UI controls ----------
+    const uiDiv = L.control({position:'topright'});
+    uiDiv.onAdd = function() {
+      const d = L.DomUtil.create('div','');
+      d.innerHTML = `<div style="padding:6px; background:rgba(255,255,255,.95); border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,.2);">
+        <b>Search tips</b>
+        <div class="control-note">
+          • Type name and press Enter.<br>
+          • If "Nothing found", right-click correct point → save name.<br>
+          • Saved places persist in this browser.
+        </div>
+        <div style="margin-top:6px;">
+          <button id="exportBtn" class="small-btn">Export JSON</button>
+          <button id="clearBtn" class="small-btn">Clear saved</button>
+        </div>
+      </div>`;
+      L.DomEvent.disableClickPropagation(d);
+      return d;
+    };
+    uiDiv.addTo(map);
+
+    // button handlers
+    setTimeout(()=>{
+      document.getElementById('exportBtn').onclick = () => {
+        const text = JSON.stringify(customPlaces, null, 2);
+        navigator.clipboard.writeText(text).then(() => showMessage('Custom places JSON copied to clipboard.'));
+      };
+      document.getElementById('clearBtn').onclick = () => {
+        if (!confirm('Clear all saved custom places?')) return;
+        customPlaces = {};
+        saveCustomPlaces();
+        addSavedMarkersToMap();
+      };
+    }, 500);
+
+    // initial render
+    addSavedMarkersToMap();
+
+    // helpful console tip
+    console.log('Tip: right-click map to save a place, or edit saved places from their popup.');
+  </script>
+</body>
+</html>
